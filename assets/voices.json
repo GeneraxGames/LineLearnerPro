@@ -1,0 +1,217 @@
+[
+    {
+        "id": "en_GB-alba-medium",
+        "label": "Alba (Scottish)",
+        "gender": "female"
+    },
+    {
+        "id": "en_US-amy-medium",
+        "label": "Amy (US)",
+        "gender": "female"
+    },
+    {
+        "id": "en_US-libritts_r-medium",
+        "label": "Brittany (US)",
+        "gender": "female"
+    },
+    {
+        "id": "fr_FR-siwis-medium",
+        "label": "Claudette (French)",
+        "gender": "female"
+    },
+    {
+        "id": "en_GB-cori-medium",
+        "label": "Cori (British)",
+        "gender": "female"
+    },
+    {
+        "id": "pl_PL-gosia-medium",
+        "label": "Gosia (Polish)",
+        "gender": "female"
+    },
+    {
+        "id": "en_US-hfc_female-medium",
+        "label": "Harriet (US)",
+        "gender": "female"
+    },
+    {
+        "id": "ru_RU-irina-medium",
+        "label": "Irina (Russian)",
+        "gender": "female"
+    },
+    {
+        "id": "en_GB-jenny_dioco-medium",
+        "label": "Jenny (British)",
+        "gender": "female"
+    },
+    {
+        "id": "es_MX-claude-high",
+        "label": "Juanita (Spanish)",
+        "gender": "female"
+    },
+    {
+        "id": "en_US-kathleen-low",
+        "label": "Kathleen (US)",
+        "gender": "female"
+    },
+    {
+        "id": "de_DE-kerstin-low",
+        "label": "Kerstin (German)",
+        "gender": "female"
+    },
+    {
+        "id": "en_US-kristin-medium",
+        "label": "Kristin (US)",
+        "gender": "female"
+    },
+    {
+        "id": "en_US-ljspeech-medium",
+        "label": "Leslie (US)",
+        "gender": "female"
+    },
+    {
+        "id": "en_US-lessac-medium",
+        "label": "Lessac (US)",
+        "gender": "female"
+    },
+    {
+        "id": "en_GB-semaine-medium",
+        "label": "Lexi (British)",
+        "gender": "female"
+    },
+    {
+        "id": "it_IT-serena-medium",
+        "label": "Mariella (Italian)",
+        "gender": "female"
+    },
+    {
+        "id": "te_IN-maya-medium",
+        "label": "Maya (Indian)",
+        "gender": "female"
+    },
+    {
+        "id": "en_GB-southern_english_female-low",
+        "label": "Paula (British)",
+        "gender": "female"
+    },
+    {
+        "id": "en_US-sam-medium",
+        "label": "Samantha (US)",
+        "gender": "female"
+    },
+    {
+        "id": "uk_UA-tetiana-high",
+        "label": "Tetiana (Ukrainian)",
+        "gender": "female"
+    },
+    {
+        "id": "en_GB-vctk-medium",
+        "label": "Vicky (British)",
+        "gender": "female"
+    },
+    {
+        "id": "en_GB-alan-medium",
+        "label": "Alan (British)",
+        "gender": "male"
+    },
+    {
+        "id": "ru_RU-ruslan-medium",
+        "label": "Boris (Russian)",
+        "gender": "male"
+    },
+    {
+        "id": "en_US-bryce-medium",
+        "label": "Bryce (US)",
+        "gender": "male"
+    },
+    {
+        "id": "es_ES-carlfm-x_low",
+        "label": "Carlos (Spanish)",
+        "gender": "male"
+    },
+    {
+        "id": "fr_FR-gilles-low",
+        "label": "Claude (French)",
+        "gender": "male"
+    },
+    {
+        "id": "en_US-danny-low",
+        "label": "Danny (US)",
+        "gender": "male"
+    },
+    {
+        "id": "en_US-arctic-medium",
+        "label": "David (US)",
+        "gender": "male"
+    },
+    {
+        "id": "en_US-hfc_male-medium",
+        "label": "Harry (US)",
+        "gender": "male"
+    },
+    {
+        "id": "pl_PL-darkman-medium",
+        "label": "Hubert (Polish)",
+        "gender": "male"
+    },
+    {
+        "id": "en_US-joe-medium",
+        "label": "Joe (US)",
+        "gender": "male"
+    },
+    {
+        "id": "en_US-john-medium",
+        "label": "John (US)",
+        "gender": "male"
+    },
+    {
+        "id": "en_US-kusal-medium",
+        "label": "Karl (US)",
+        "gender": "male"
+    },
+    {
+        "id": "de_DE-karlsson-low",
+        "label": "Karlsson (German)",
+        "gender": "male"
+    },
+    {
+        "id": "en_GB-northern_english_male-medium",
+        "label": "Lee (British)",
+        "gender": "male"
+    },
+    {
+        "id": "it_IT-riccardo-x_low",
+        "label": "Mario (Italian)",
+        "gender": "male"
+    },
+    {
+        "id": "en_US-mike-medium",
+        "label": "Mike (US)",
+        "gender": "male"
+    },
+    {
+        "id": "en_US-norman-medium",
+        "label": "Norman (US)",
+        "gender": "male"
+    },
+    {
+        "id": "uk_UA-oleksa-high",
+        "label": "Oleksa (Ukrainian)",
+        "gender": "male"
+    },
+    {
+        "id": "en_US-reza_ibrahim-medium",
+        "label": "Robert (US)",
+        "gender": "male"
+    },
+    {
+        "id": "te_IN-venkatesh-medium",
+        "label": "Romesh (Indian)",
+        "gender": "male"
+    },
+    {
+        "id": "en_US-ryan-medium",
+        "label": "Ryan (US)",
+        "gender": "male"
+    }
+]

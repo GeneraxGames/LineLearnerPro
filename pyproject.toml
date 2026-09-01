@@ -1,0 +1,17 @@
+[project]
+name = "linelearnerpro"
+version = "1.0.0"
+description = "LineLearnerPro - line rehearsal tool"
+requires-python = ">=3.12"
+dependencies = [
+    "flet==0.86.0",
+    "flet-desktop==0.86.0",
+    "flet-audio==0.86.0",
+    "Pillow",
+    "piper-tts",
+    "vosk",
+    "sounddevice",
+]
+
+[tool.flet]
+product = "LineLearnerPro"

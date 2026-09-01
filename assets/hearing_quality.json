@@ -1,0 +1,23 @@
+[
+    {
+        "tier": "low",
+        "label": "Low",
+        "model_name": "vosk-model-small-en-us-0.15",
+        "size_mb": 40,
+        "description": "Fastest and lightest - the safest starting point on older or lower-powered hardware."
+    },
+    {
+        "tier": "medium",
+        "label": "Medium",
+        "model_name": "vosk-model-en-us-0.22-lgraph",
+        "size_mb": 128,
+        "description": "Noticeably more accurate than Low, but can run slower in practice on weaker hardware."
+    },
+    {
+        "tier": "high",
+        "label": "High",
+        "model_name": "vosk-model-en-us-0.22",
+        "size_mb": 1800,
+        "description": "The most accurate option - a MUCH bigger download, best suited to very powerful hardware."
+    }
+]
