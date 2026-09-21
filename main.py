@@ -103,13 +103,7 @@ STAGE_DIRECTION_COLOR = "#808080"  # RGB(128, 128, 128)
 _INLINE_PARENS_SPLIT_RE = re.compile(r"(\([^()]*\))")
 
 def build_transcript_line_spans(text: str, override_color: str | None = None) -> list:
-    """Splits a line's raw text (exactly as it appeared in the script)
-    into Flet TextSpans for rendering. override_color, when given,
-    forces EVERY span - stage directions included - to that exact
-    color, while still preserving the italic styling that distinguishes
-    stage directions from spoken text. Used to flag a rehearse-mode
-    line whose recognized speech scored below LINE_MATCH_THRESHOLD in a
-    single, unmistakable color (see _build_transcript_entry_control)."""
+    """Splits a line's raw text (exactly as it appeared in the script) into Flet TextSpans for rendering"""
     spans = []
     for part in _INLINE_PARENS_SPLIT_RE.split(text):
         if not part:
@@ -279,6 +273,54 @@ def get_blocks_with_scope_context(parsed_script: dict, act_index, scene_index) -
             for block in scene["blocks"]:
                 entries.append((block, act_label, scene_label))
     return entries
+
+# Smart Cue: how far ahead of the user's own next line it aims to land, and the assumed reading pace used to estimate that from word counts
+SMART_CUE_TARGET_SECONDS = 30
+SMART_CUE_ESTIMATED_WORDS_PER_MINUTE = 120
+
+# How long each skipped block's brief appearance in the transcript lingers before the next one during Smart Cue's fast-forward pass
+SMART_CUE_SKIP_STEP_SECONDS = 0.12
+
+def compute_smart_cue_target_index(
+    entries: list,
+    current_index: int,
+    my_selected_roles: set,
+    target_seconds: float = SMART_CUE_TARGET_SECONDS,
+    words_per_minute: float = SMART_CUE_ESTIMATED_WORDS_PER_MINUTE,
+):
+    """Where Smart Cue should jump to: about target_seconds of estimated reading time before the user's next own line"""
+    next_own_line_index = None
+    for i in range(current_index, len(entries)):
+        block = entries[i][0]
+        if block["type"] == "line" and block["character"] in my_selected_roles:
+            next_own_line_index = i
+            break
+    if next_own_line_index is None:
+        return None
+
+    def block_seconds(block: dict) -> float:
+        if block["type"] != "line" or not block.get("spoken_text"):
+            return 0.0  # only spoken lines take estimated time - directions are shown instantly
+        word_count = len(block["spoken_text"].split())
+        return word_count / words_per_minute * 60
+
+    total_seconds = sum(block_seconds(entries[i][0]) for i in range(current_index, next_own_line_index))
+    if total_seconds <= target_seconds:
+        return None  # already closer than the target - nothing worth skipping
+
+    cumulative = 0.0
+    target_index = current_index
+    for i in range(next_own_line_index - 1, current_index - 1, -1):
+        cumulative += block_seconds(entries[i][0])
+        target_index = i
+        if cumulative >= target_seconds:
+            break
+
+    if target_index <= current_index:
+        # The only way to reach target_seconds of runway required consuming the CURRENT line's own entire duration
+        return None
+
+    return target_index
 
 def build_read_aloud_scope_options(parsed_script: dict) -> list:
     """Builds the list of scope choices ReadScriptAloud's menu should offer"""
@@ -470,10 +512,7 @@ def _get_vosk_model(model_name: str):
     return _vosk_model_cache
 
 def _pronunciation_dictionary_path() -> Path:
-    """Lives in the per-user app data folder alongside preferences.json -
-    NOT next to main.py, since an installed copy of the app (e.g. under
-    Program Files) is typically read-only for a standard user, and this
-    file gets written to whenever a pronunciation entry is added."""
+    """Lives in the per-user app data folder alongside preferences.json"""
     return _app_data_dir() / "pronunciation.json"
 
 def load_pronunciation_dictionary_sync() -> list:
@@ -522,9 +561,8 @@ def apply_pronunciation_dictionary_to_script(parsed_script: dict, entries: list)
                     block["spoken_text"] = apply_pronunciation_dictionary(block["spoken_text"], entries)
 
 def reapply_pronunciation_dictionary_to_parsed_script(parsed_script: dict, entries: list) -> None:
-    """For an ALREADY-parsed script (e.g. a loaded .llp, where script.json already holds both "text" and a previously-derived
-    "spoken_text" for every line) - regenerates spoken_text fresh from the untouched "text" field for every line first, THEN applies the
-    CURRENT dictionary."""
+    """For an ALREADY-parsed script (e.g. a loaded .llp, where script.json already holds both "text" and a previously-derived "spoken_text" for
+    every line) - regenerates spoken_text fresh from the untouched "text" field for every line first, THEN applies the CURRENT dictionary."""
     for act in parsed_script["acts"]:
         for scene in act["scenes"]:
             for block in scene["blocks"]:
@@ -854,13 +892,7 @@ class LineLearnerProApp:
         self.page = page
         self.dark_mode = True
 
-        # Shared across every file dialog, regardless of type (txt,
-        # llp, cast photos) - Windows' native dialogs remember the last
-        # folder automatically, system-wide, at no cost to this app.
-        # zenity, launched fresh as a separate process each time, has
-        # no memory of its own between calls - this is what gives it
-        # the same convenience explicitly, one directory tracked across
-        # every zenity call this session.
+        # Shared across every file dialog, regardless of type
         self._last_file_dialog_dir: str | None = None
 
         self.menu_mode = 0
@@ -907,6 +939,20 @@ class LineLearnerProApp:
         self._read_aloud_current_scene_label: str = ""
 
         self._read_aloud_transcript: list = []
+
+        # The current scope's flattened (block, act_label, scene_label) entries, and which index
+        # within them reading has reached - both needed outside _read_lines_for_scope's own loop so
+        # Smart Cue can inspect/redirect them. See compute_smart_cue_target_index.
+        self._read_aloud_entries: list = []
+        self._read_aloud_block_index: int = 0
+
+        # Set by Smart Cue to interrupt whatever's currently playing and jump reading to this index
+        # instead of advancing normally by one - cleared once that jump has happened.
+        self._read_aloud_skip_to_index: int | None = None
+
+        # Reference to the currently-mounted Smart Cue lozenge, so its enabled/disabled look can be
+        # refreshed in place as reading progresses, same reasoning as _read_aloud_reading_text below.
+        self._smart_cue_button = None
 
         # References to the CURRENTLY-MOUNTED "Reading: ..." Text and transcript ListView controls
         self._read_aloud_reading_text = None
@@ -1053,11 +1099,7 @@ class LineLearnerProApp:
             pass
 
     def _preferences_file_path(self) -> Path:
-        """Where the preferences file lives - the per-user app data
-        folder, NOT next to main.py, since an installed copy of the app
-        (e.g. under Program Files) is typically read-only for a
-        standard user without admin rights, same reasoning as the
-        voice cache and pronunciation dictionary."""
+        """Where the preferences file lives - the per-user app data folder, NOT next to main.py"""
         return _app_data_dir() / "preferences.json"
 
     def load_user_preferences(self):
@@ -1104,23 +1146,9 @@ class LineLearnerProApp:
         await self._apply_loaded_llp_bundle(bundle, path.name, path, verb="Reopened")
 
     def _clear_stale_auto_load_state(self):
-        """Called when the remembered last-opened .llp can't actually be
-        reopened (deleted, moved, or corrupted). self.my_selected_roles
-        was already restored from preferences.json moments earlier in
-        load_user_preferences, unconditionally, before this auto-load
-        even ran - without this, it's left dangling: non-empty, but
-        referring to roles in a script that never actually loaded.
-        Since Script read-along/Rehearse my lines gate on
-        my_selected_roles alone, this was exactly what let them appear
-        live on the main menu with nothing genuinely loaded at all.
+        """Called when the remembered last-opened .llp can't actually be reopened (deleted, moved, or corrupted)
 
-        Also updates preferences.json immediately, not deferred to the
-        next quit - self.loaded_script_path is still None at this
-        point (the load never got far enough to set it), so this write
-        naturally omits last_loaded_llp too, clearing the same stale
-        reference that caused this, so it can't recur on the next
-        launch either. And rebuilds the menu, since this runs as an
-        async task after the very first menu build already happened."""
+        Also updates preferences.json immediately, not deferred to the next quit"""
         if self.my_selected_roles:
             self.my_selected_roles = set()
         self._save_user_preferences()
@@ -1673,6 +1701,32 @@ class LineLearnerProApp:
                 "struggle more often, and there's no real way around "
                 "this - it's an unavoidable limit of the underlying "
                 "technology, not something a setting can fix."
+            ),
+            ft.Text("Smart Cue", size=16, weight=ft.FontWeight.W_500),
+            self._help_paragraph(
+                f"Available in all three reading modes. Jumps reading "
+                f"ahead to about {SMART_CUE_TARGET_SECONDS} seconds "
+                f"before your own next line, so there's no need to sit "
+                f"through a long stretch of someone else's dialogue "
+                f"just to reach your cue."
+            ),
+            self._help_paragraph(
+                "Never cuts a line off partway through - if landing "
+                "early would fall in the middle of a line, that whole "
+                "line is read from its start instead, even if that "
+                "means slightly more lead-in than usual."
+            ),
+            self._help_paragraph(
+                "What gets skipped is still shown, briefly, dimmed in "
+                "the transcript as it flashes past - not silently "
+                "missed out, just skipped through quickly rather than "
+                "performed."
+            ),
+            self._help_paragraph(
+                "Greyed out and unavailable whenever there's nothing "
+                "useful to jump to - already close to your next line, "
+                "or no more of your own lines left in the current "
+                "scope."
             ),
             ft.Text("Keyboard shortcuts (desktop)", size=16, weight=ft.FontWeight.W_500),
             self._help_paragraph(
@@ -2314,16 +2368,7 @@ class LineLearnerProApp:
         return handler
 
     def menu_button(self, label: str, on_click, icon=None, danger: bool = False, disabled: bool = False) -> ft.Button:
-        """One place that defines what every menu control looks like, so
-        touch-target size and styling stay consistent everywhere.
-
-        Danger styling only applies while the button is actually
-        enabled - a disabled button should look de-emphasised/greyed
-        out regardless of danger, not fight Flet's own automatic
-        disabled-state dimming with an explicit, vivid colour override
-        that applies unconditionally. (This combination was never
-        exercised before Remove Loaded Script - Quit, the only other
-        danger button, is never actually disabled.)"""
+        """One place that defines what every menu control looks like, so touch-target size and styling stay consistent everywhere"""
         apply_danger_style = danger and not disabled
         return ft.Button(
             content=ft.Row(
@@ -2469,18 +2514,8 @@ class LineLearnerProApp:
         )
 
     def remove_loaded_script(self, e):
-        """Clears everything about the currently loaded project - raw
-        text, the analysed structure, every role's assignments and
-        selections, and the remembered file path.
-
-        Deliberately the ONLY way any of this gets cleared. Loading a
-        new .txt over an existing project preserves matching roles by
-        design (see AnalyseScript's own reconciliation) - the app has
-        no reliable way to tell "an edited version of the same play"
-        apart from "a genuinely different one" just from a file's
-        contents or name (renaming to "script v2.txt" would defeat any
-        filename-based guess), so it never tries to guess. This button
-        exists so the user can say so explicitly instead."""
+        """Clears everything about the currently loaded project - raw text, the analysed structure, every role's assignments and
+        selections, and the remembered file path"""
         if self.has_unsaved_changes:
             self.page.show_dialog(self._build_discard_project_dialog())
             return
@@ -2494,18 +2529,13 @@ class LineLearnerProApp:
         self.has_unsaved_changes = False
         self.loaded_script_filename = None
         self.loaded_script_path = None
-        # Written immediately, not deferred to the next quit - an
-        # abnormal exit (crash, force-close) in between would otherwise
-        # leave the OLD .llp still remembered for auto-reload next
-        # launch, silently undoing this entire action.
+        # Written immediately, not deferred to the next quit
         self._save_user_preferences()
         self.build_menu()
         self.page.show_dialog(ft.SnackBar(ft.Text("Script removed - ready to load a new one.")))
 
     def _build_discard_project_dialog(self) -> ft.AlertDialog:
-        """The Save / Discard / Cancel prompt shown by RemoveLoadedScript
-        when has_unsaved_changes is True - same shape and styling as
-        _build_unsaved_changes_dialog, for this different action."""
+        """The Save / Discard / Cancel prompt shown by RemoveLoadedScript when has_unsaved_changes is True"""
 
         def cancel(e):
             self.page.pop_dialog()
@@ -2680,19 +2710,85 @@ class LineLearnerProApp:
         parts = [p for p in (self._read_aloud_current_act_label, self._read_aloud_current_scene_label) if p]
         return f"Reading: {' '.join(parts)}" if parts else "Reading..."
 
-    def _build_action_lozenge(self, label: str, on_click, bgcolor, color) -> ft.Container:
-        """One rounded, pill-shaped action button for the reading screen's action bar"""
+    def _build_action_lozenge(self, label: str, on_click, bgcolor, color, disabled: bool = False) -> ft.Container:
+        """One rounded, pill-shaped action button for the reading screen's action bar. disabled shows it greyed-out and unclickable - used by
+        Smart Cue, whose availability changes as reading progresses (see _smart_cue_enabled/_update_smart_cue_button_state)."""
         return ft.Container(
-            content=ft.Text(label, size=16, weight=ft.FontWeight.W_500, color=color),
-            on_click=on_click,
-            bgcolor=bgcolor,
+            content=ft.Text(label, size=16, weight=ft.FontWeight.W_500, color=ft.Colors.ON_SURFACE_VARIANT if disabled else color),
+            on_click=None if disabled else on_click,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST if disabled else bgcolor,
             padding=ft.padding.Padding.symmetric(horizontal=24, vertical=10),
             border_radius=24,
+            opacity=0.5 if disabled else 1.0,
         )
+
+    def _smart_cue_target_index(self):
+        """Where Smart Cue would currently jump to, or None if it's not available right now - either no own line is left ahead in this scope,
+        or it's already closer than the target lead-in."""
+        return compute_smart_cue_target_index(self._read_aloud_entries, self._read_aloud_block_index, self.my_selected_roles)
+
+    def _smart_cue_enabled(self) -> bool:
+        """Whether the Smart Cue lozenge should currently be clickable - not while genuinely paused waiting on the user's own line"""
+        if not self._read_aloud_active or self._read_along_waiting_for_continue:
+            return False
+        return self._smart_cue_target_index() is not None
+
+    def _set_smart_cue_button_look(self, enabled: bool):
+        """Applies the enabled/disabled look to the Smart Cue lozenge in place, without recomputing eligibility itself"""
+        if not self._smart_cue_button:
+            return
+        self._smart_cue_button.content.color = ft.Colors.ON_SECONDARY if enabled else ft.Colors.ON_SURFACE_VARIANT
+        self._smart_cue_button.bgcolor = ft.Colors.SECONDARY if enabled else ft.Colors.SURFACE_CONTAINER_HIGHEST
+        self._smart_cue_button.on_click = self.on_smart_cue_pressed if enabled else None
+        self._smart_cue_button.opacity = 1.0 if enabled else 0.5
+        self._smart_cue_button.update()
+
+    def _update_smart_cue_button_state(self):
+        """Refreshes the Smart Cue lozenge's enabled/disabled look in place by recomputing eligibility from scratch"""
+        self._set_smart_cue_button_look(self._smart_cue_enabled())
+
+    def on_smart_cue_pressed(self, e):
+        """Smart Cue lozenge handler - jumps reading ahead to about SMART_CUE_TARGET_SECONDS before the user's next own line"""
+        if not self._smart_cue_enabled():
+            return
+        target_index = self._smart_cue_target_index()
+        if target_index is None:
+            return
+        self._read_aloud_skip_to_index = target_index
+        # Greyed out immediately, rather than waiting for the next normal recomputation
+        self._set_smart_cue_button_look(False)
+
+    async def _fast_forward_through_skip(self, entries: list, from_index: int, to_index: int):
+        """Smart Cue's visual pass-through for the blocks being skipped (from_index up to but not including to_index) - each one is briefly shown"""
+        for i in range(from_index, to_index):
+            if self._read_aloud_stop_requested:
+                return
+            block = entries[i][0]
+            if block["type"] == "direction":
+                self._append_read_aloud_transcript_entry({
+                    "type": "direction",
+                    "character": None,
+                    "text": block["text"],
+                    "photo": None,
+                    "skipped": True,
+                })
+            elif block["type"] == "line":
+                self._append_read_aloud_transcript_entry({
+                    "type": "line",
+                    "character": block["character"],
+                    "text": block["text"],
+                    "spoken_text": block["spoken_text"],
+                    "photo": self._photo_for_character(block["character"]),
+                    "listening": False,
+                    "skipped": True,
+                })
+            # "unrecognised" blocks are never shown even during normal reading - skip them here too
+            await asyncio.sleep(SMART_CUE_SKIP_STEP_SECONDS)
 
     def _build_read_aloud_action_bar(self) -> ft.Row:
         """The row of controls directly beneath the reading screen's header - Quit always, 
-        plus a primary-styled lozenge in read-along mode (Continue) and rehearse mode (Done)"""
+        plus a primary-styled lozenge in read-along mode (Continue) and rehearse mode (Done),
+        plus Smart Cue in all three modes (Read Script Aloud, Script Read-along, Rehearse My Lines)"""
         buttons = []
         if self._read_aloud_mode == "read_along":
             buttons.append(
@@ -2702,11 +2798,19 @@ class LineLearnerProApp:
             buttons.append(
                 self._build_action_lozenge("Done", self.continue_read_along, ft.Colors.PRIMARY, ft.Colors.ON_PRIMARY)
             )
+        self._smart_cue_button = self._build_action_lozenge(
+            "Smart Cue", self.on_smart_cue_pressed, ft.Colors.SECONDARY, ft.Colors.ON_SECONDARY,
+            disabled=not self._smart_cue_enabled(),
+        )
+        buttons.append(self._smart_cue_button)
         buttons.append(self._build_action_lozenge("Quit", self.quit_read_aloud, ft.Colors.ERROR, ft.Colors.ON_ERROR))
         return ft.Row(buttons, alignment=ft.MainAxisAlignment.CENTER, spacing=16)
 
     def _build_transcript_entry_control(self, entry: dict) -> ft.Control:
-        """One entry in the reading screen's transcript"""
+        """One entry in the reading screen's transcript. A "skipped": True entry (from Smart Cue's fast-forward pass - see _fast_forward_through_skip)
+        renders dimmed, so it's visibly clear it was skipped past rather than performed."""
+        opacity = 0.45 if entry.get("skipped") else 1.0
+
         if entry["type"] == "direction":
             return ft.Container(
                 content=ft.Text(
@@ -2718,6 +2822,7 @@ class LineLearnerProApp:
                 ),
                 padding=ft.padding.Padding.symmetric(horizontal=16, vertical=8),
                 alignment=ft.alignment.Alignment.CENTER,
+                opacity=opacity,
             )
 
         if entry.get("listening"):
@@ -2757,6 +2862,7 @@ class LineLearnerProApp:
                 vertical_alignment=ft.CrossAxisAlignment.START,
             ),
             padding=ft.padding.Padding.symmetric(horizontal=16, vertical=4),
+            opacity=opacity,
         )
 
     def build_read_aloud_screen(self) -> ft.Column:
@@ -2867,6 +2973,16 @@ class LineLearnerProApp:
             return role.voice
         return FALLBACK_VOICE_ID
 
+    def _photo_for_character(self, character: str):
+        """The photo (or fallback icon/logo) to show in the transcript for a given character - shared
+        by the main reading loop and Smart Cue's skip-through pass (_fast_forward_through_skip)."""
+        role = next((r for r in self.roles if r.character == character), None)
+        if role and role.photo:
+            return role.photo
+        if role:
+            return self._default_icon_source(role)
+        return self.logo_image
+
     async def _play_one_unit(self, voice_id: str, unit_text: str):
         """Synthesizes and plays ONE small unit of text (a sentence, or one clause-piece of an unusually long sentence)"""
         loop = asyncio.get_event_loop()
@@ -2892,17 +3008,18 @@ class LineLearnerProApp:
         self.voice_player.on_state_change = previous_handler
 
     async def _play_line_audio(self, character: str, spoken_text: str) -> bool:
-        """Plays one whole line, unit by unit. Returns False if playback was stopped early (Quit was pressed mid-line)."""
+        """Plays one whole line, unit by unit. Returns False if playback was stopped early (Quit was
+        pressed mid-line, or Smart Cue interrupted it to jump elsewhere)."""
         voice_id = self._resolve_voice_for_character(character)
         groups = _split_text_for_synthesis(spoken_text)
 
         for group_index, group in enumerate(groups):
             for unit in group:
-                if self._read_aloud_stop_requested:
+                if self._read_aloud_stop_requested or self._read_aloud_skip_to_index is not None:
                     return False
                 await self._play_one_unit(voice_id, unit)
 
-            if self._read_aloud_stop_requested:
+            if self._read_aloud_stop_requested or self._read_aloud_skip_to_index is not None:
                 return False
             if group_index < len(groups) - 1:
                 await asyncio.sleep(SENTENCE_PAUSE_SECONDS)
@@ -2910,9 +3027,9 @@ class LineLearnerProApp:
         return True
 
     async def _read_lines_for_scope(self, option: dict):
-        """The audio+transcript side of ReadScriptAloud/ScriptReadAlong -
-        see self._read_aloud_mode for which one's currently active."""
+        """The audio+transcript side of ReadScriptAloud/ScriptReadAlong - see self._read_aloud_mode for which one's currently active."""
         entries = get_blocks_with_scope_context(self.parsed_script, option["act_index"], option["scene_index"])
+        self._read_aloud_entries = entries
         blocks = [entry[0] for entry in entries]
 
         # Warm up every voice this scope will actually need BEFORE reading starts
@@ -2922,13 +3039,19 @@ class LineLearnerProApp:
         if characters_needed:
             await self._prepare_voices_for_scope(characters_needed)
 
-        for block, act_label, scene_label in entries:
+        # An index-based loop rather than a plain "for" - Smart Cue needs to be able to redirect
+        # where reading continues from (self._read_aloud_block_index), not just step through in order.
+        self._read_aloud_block_index = 0
+        while self._read_aloud_block_index < len(entries):
             if self._read_aloud_stop_requested:
                 return
+
+            block, act_label, scene_label = entries[self._read_aloud_block_index]
 
             self._read_aloud_current_act_label = act_label or ""
             self._read_aloud_current_scene_label = scene_label or ""
             self._update_read_aloud_header_text()
+            self._update_smart_cue_button_state()
 
             if block["type"] == "direction":
                 self._append_read_aloud_transcript_entry({
@@ -2937,18 +3060,14 @@ class LineLearnerProApp:
                     "text": block["text"],
                     "photo": None,
                 })
+                self._read_aloud_block_index += 1
                 continue
 
             if block["type"] != "line":
+                self._read_aloud_block_index += 1
                 continue  # "unrecognised" blocks aren't shown or spoken
 
-            role = next((r for r in self.roles if r.character == block["character"]), None)
-            if role and role.photo:
-                photo = role.photo
-            elif role:
-                photo = self._default_icon_source(role)
-            else:
-                photo = self.logo_image
+            photo = self._photo_for_character(block["character"])
 
             is_users_line = block["character"] in self.my_selected_roles
 
@@ -2964,9 +3083,11 @@ class LineLearnerProApp:
             })
 
             if self._read_aloud_mode in ("read_along", "rehearse") and is_users_line:
-                # This is the user's OWN line - they perform it themselves (reading along with the script, or from memory in rehearse mode)
+                # This is the user's OWN line - they perform it themselves (reading along with the script, or from memory in rehearse mode).
+                # Smart Cue is disabled while this wait is happening (see _smart_cue_enabled) - there's nothing sensible for it to do here
                 listening_entry_index = len(self._read_aloud_transcript) - 1 if is_listening_entry else None
                 self._read_along_waiting_for_continue = True
+                self._update_smart_cue_button_state()
                 self._read_along_continue_event.clear()
                 await self._start_listening()
                 await self._read_along_continue_event.wait()
@@ -2978,10 +3099,12 @@ class LineLearnerProApp:
                 if listening_entry_index is not None:
                     # Done was genuinely pressed - reveal the actual line now that the user has said it
                     self._reveal_read_aloud_line(listening_entry_index, heard_text)
+                self._read_aloud_block_index += 1
                 continue
 
             spoken_text = block["spoken_text"]
             if not spoken_text:
+                self._read_aloud_block_index += 1
                 continue  # nothing to actually say (e.g. a line that was entirely a stage direction)
 
             try:
@@ -2990,11 +3113,25 @@ class LineLearnerProApp:
                 # Covers a synthesis/playback failure that survived even _get_loaded_voice's own self-healing retry
                 self.page.show_dialog(ft.SnackBar(ft.Text(f"Couldn't read this line: {ex}")))
                 return
-            if not completed:
+
+            if self._read_aloud_stop_requested:
                 return
+            if not completed and self._read_aloud_skip_to_index is not None:
+                # Interrupted by Smart Cue specifically, not Quit - fast-forward visibly through what's being skipped
+                skip_target = self._read_aloud_skip_to_index
+                self._read_aloud_skip_to_index = None
+                await self._fast_forward_through_skip(entries, self._read_aloud_block_index + 1, skip_target)
+                if self._read_aloud_stop_requested:
+                    return
+                self._read_aloud_block_index = skip_target
+                continue
+            if not completed:
+                return  # stopped for some other reason
+            self._read_aloud_block_index += 1
 
         # The scope has finished naturally (every block processed, not stopped early or errored out) - pause here
         self._read_aloud_waiting_at_end = True
+        self._update_smart_cue_button_state()  # nothing left to cue toward once the scope has ended
         self._read_along_continue_event.clear()
         await self._read_along_continue_event.wait()
         self._read_aloud_waiting_at_end = False
@@ -3010,6 +3147,9 @@ class LineLearnerProApp:
             self._read_along_waiting_for_continue = False
             self._read_along_continue_event = asyncio.Event()
             self._read_aloud_active = True
+            self._read_aloud_entries = []
+            self._read_aloud_block_index = 0
+            self._read_aloud_skip_to_index = None
             # ScrollMode.HIDDEN does NOT disable scrolling
             self.page.scroll = None
             self.build_menu()
@@ -3391,10 +3531,7 @@ class LineLearnerProApp:
     def _tkinter_pick_file_sync(self, title: str, filetypes: list) -> str:
         """Blocking helper - runs OFF the asyncio event loop, since opening a file dialog is synchronous and would otherwise freeze
         the whole app while open. On Windows, uses the native Win32 dialog via ctypes. On Linux, uses zenity (see
-        _zenity_pick_file_sync) - tkinter is confirmed NOT to reliably bundle with this app's Python packaging on Linux
-        (ModuleNotFoundError: No module named 'tkinter' at runtime, on a genuinely fresh install - the same class of
-        packaging gap that already hit Windows once, which is why the native Win32 dialogs exist at all). macOS still
-        uses tkinter below, since that platform hasn't been tested yet either way."""
+        _zenity_pick_file_sync) - tkinter is confirmed NOT to reliably bundle with this app's Python packaging on Linux"""
         if self.page.platform == ft.PagePlatform.WINDOWS:
             return self._win32_pick_file_sync(title, filetypes)
         if self.page.platform == ft.PagePlatform.LINUX:
@@ -3411,20 +3548,7 @@ class LineLearnerProApp:
         return path
 
     def _zenity_pick_file_sync(self, title: str, filetypes: list) -> str:
-        """The Linux-native equivalent of _tkinter_pick_file_sync, via
-        zenity (a standard, commonly pre-installed GTK dialog tool,
-        called as an external program rather than a Python module - it
-        can't suffer the same "missing from the bundle" problem tkinter
-        just did, since nothing about it needs to be packaged with the
-        app at all). filetypes is the same (label, pattern) tuple list
-        already used for tkinter's own filetypes parameter, translated
-        directly into zenity's "label | pattern" filter syntax.
-
-        Starts in self._last_file_dialog_dir if one's already been
-        recorded, and updates it after a successful pick - Windows'
-        native dialogs remember the last folder for free, system-wide;
-        zenity, launched fresh as a separate process every time, has no
-        memory of its own unless the app supplies it explicitly."""
+        """The Linux-native equivalent of _tkinter_pick_file_sync, via zenity (a standard, commonly pre-installed GTK dialog tool"""
         args = ["zenity", "--file-selection", "--title", title]
         if self._last_file_dialog_dir:
             # A trailing slash tells zenity this is a directory to
@@ -3436,9 +3560,7 @@ class LineLearnerProApp:
         try:
             result = subprocess.run(args, capture_output=True, text=True)
         except FileNotFoundError:
-            # zenity itself isn't installed - fail gracefully (an empty
-            # path is already handled as "no selection made" by every
-            # caller of _pick_file_bytes) rather than crash outright.
+            # zenity itself isn't installed - fail gracefully
             return ""
         if result.returncode != 0:
             return ""  # cancelled, or zenity itself errored - either way, nothing to return
@@ -3496,8 +3618,7 @@ class LineLearnerProApp:
             dialog_title=dialog_title,
             file_type=flet_file_type,
             allow_multiple=False,
-            # Always ask for raw bytes rather than relying on FilePickerFile.path - path is unavailable in web mode
-            # and isn't guaranteed on mobile either, so bytes is the one approach that behaves identically everywhere.
+            # Always ask for raw bytes rather than relying on FilePickerFile.path
             with_data=True,
         )
         if flet_allowed_extensions:
@@ -3617,24 +3738,12 @@ class LineLearnerProApp:
         self.build_menu()  # refresh the screen so the new thumbnail shows immediately
 
     def _resolve_role_photo_bytes(self, role: "Role") -> "bytes | None":
-        """The actual PNG bytes to embed in the .llp for one role - ONLY
-        if a real, user-chosen custom photo has been set. Returns None
-        otherwise, so build_llp_bundle skips writing a photo file for
-        this role entirely.
-
-        Critical: this must NEVER bake in a snapshot of the current
-        gender-based default mask here. Doing so was the actual bug -
-        once saved, that snapshot becomes role.photo on the next load
-        (truthy, non-empty bytes), which then permanently overrides the
-        dynamic, gender-based default forever after - a role's icon
-        would stop following its gender the moment the .llp had been
-        saved and reloaded even once, no matter what gender was
-        selected afterward, since role.photo would always win."""
+        """The actual PNG bytes to embed in the .llp for one role - ONLY if a real, user-chosen custom photo has been set.
+        Critical: this must NEVER bake in a snapshot of the current gender-based default mask here."""
         return role.photo if role.photo else None
 
     def _tkinter_pick_save_path_sync(self, default_name: str) -> str:
-        """Blocking helper, same reasoning and platform dispatch as
-        _tkinter_pick_file_sync - see that function's own docstring for
+        """Blocking helper, same reasoning and platform dispatch as _tkinter_pick_file_sync - see that function's own docstring for
         why Linux specifically routes to zenity rather than tkinter."""
         if self.page.platform == ft.PagePlatform.WINDOWS:
             return self._win32_pick_save_path_sync(default_name)
@@ -3657,15 +3766,8 @@ class LineLearnerProApp:
         return path
 
     def _zenity_pick_save_path_sync(self, default_name: str) -> str:
-        """The Linux-native equivalent of _tkinter_pick_save_path_sync,
-        via zenity - same reasoning as _zenity_pick_file_sync, including
-        starting in and updating self._last_file_dialog_dir.
-
-        --filename here does double duty (the starting directory AND
-        the suggested filename together), so the last-used directory
-        and default_name need combining into one full path, rather
-        than just overwriting one with the other the way the simpler
-        open-dialog case does."""
+        """The Linux-native equivalent of _tkinter_pick_save_path_sync, via zenity - same reasoning as _zenity_pick_file_sync, including
+        starting in and updating self._last_file_dialog_dir."""
         starting_path = default_name
         if self._last_file_dialog_dir:
             starting_path = str(Path(self._last_file_dialog_dir) / default_name)
@@ -3683,9 +3785,7 @@ class LineLearnerProApp:
         if result.returncode != 0:
             return ""
         path = result.stdout.strip()
-        # zenity doesn't apply a defaultextension the way tkinter's
-        # asksaveasfilename does - add .llp ourselves if the user typed
-        # a bare name with no extension at all.
+        # zenity doesn't apply a defaultextension the way tkinter's asksaveasfilename does - add .llp ourselves if required
         if path and "." not in Path(path).name:
             path += ".llp"
         if path:
