@@ -1,5 +1,5 @@
 """
-    LineLearnerPro
+    LineLearnerPro 1.2.0
     (C)opyright PeeJay 2026
     powered by Haribo Goldbears
 """
@@ -579,10 +579,58 @@ def is_voice_downloaded(voice_id: str) -> bool:
     model_path, config_path = _voice_model_paths(voice_id)
     return model_path.exists() and config_path.exists()
 
+_MIN_VOICE_MODEL_BYTES = 1_000_000  # real Piper models are tens of MB - anything smaller is a stub or an error page, not a model
+
+def _download_to_file_verified(url: str, dest: Path, attempts: int = 3) -> None:
+    """BLOCKING - downloads `url` to `dest`, guaranteeing a short/failed download is NEVER left at the final filename.
+    Piper's own downloader writes straight to the final path, and urllib returns a SHORT body with NO exception if the connection drops
+    mid-file - so a half-downloaded .onnx looked "downloaded" forever, then failed later inside ONNX Runtime as INVALID_PROTOBUF.
+    Here the data goes to a temp file first, the byte count is checked against Content-Length, and only then is it moved into place."""
+    import time
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=dest.name + ".", suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as tmp_file:
+                with urllib.request.urlopen(url, timeout=60) as response:
+                    expected = response.headers.get("Content-Length")
+                    shutil.copyfileobj(response, tmp_file)
+            received = os.path.getsize(tmp_name)
+            if received == 0:
+                raise IOError("empty download")
+            if expected is not None and received != int(expected):
+                raise IOError(f"incomplete download - got {received:,} of {int(expected):,} bytes")
+            os.replace(tmp_name, dest)
+            return
+        except Exception as ex:
+            last_error = ex
+        finally:
+            if os.path.exists(tmp_name):  # still here = never made it into place, so don't leave it behind
+                os.unlink(tmp_name)
+        if attempt < attempts:
+            time.sleep(2 * attempt)
+    raise IOError(f"Couldn't download {dest.name} after {attempts} attempts ({last_error})")
+
 def download_voice_sync(voice_id: str) -> None:
-    """BLOCKING - downloads a voice's model + config from Piper's own official Hugging Face repository into the local cache, if not already present"""
-    from piper.download_voices import download_voice as _piper_download_voice
-    _piper_download_voice(voice_id, _voices_cache_dir())
+    """BLOCKING - downloads a voice's model + config from Piper's own official Hugging Face repository into the local cache, if not already present.
+    Uses Piper's own URL layout and voice-id parsing, but NOT Piper's download function (see _download_to_file_verified for why)."""
+    from piper.download_voices import URL_FORMAT, VOICE_PATTERN
+    match = VOICE_PATTERN.match(voice_id.strip())
+    if not match:
+        raise ValueError(f"Voice '{voice_id}' did not match pattern: <language>-<name>-<quality> like 'en_US-lessac-medium'")
+    lang_family = match.group("lang_family")
+    format_args = {
+        "lang_family": lang_family,
+        "lang_code": lang_family + "_" + match.group("lang_region"),
+        "voice_name": match.group("voice_name"),
+        "voice_quality": match.group("voice_quality"),
+    }
+    model_path, config_path = _voice_model_paths(voice_id)
+    if not model_path.exists() or model_path.stat().st_size < _MIN_VOICE_MODEL_BYTES:
+        _download_to_file_verified(URL_FORMAT.format(extension=".onnx", **format_args), model_path)
+    if not config_path.exists() or config_path.stat().st_size == 0:
+        _download_to_file_verified(URL_FORMAT.format(extension=".onnx.json", **format_args), config_path)
 
 def delete_voice_sync(voice_id: str) -> None:
     """BLOCKING - removes a downloaded voice's model+config files, and its per-user CACHED audition clip (~/.linelearnerpro/auditions/)"""
